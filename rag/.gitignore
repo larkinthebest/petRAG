@@ -1,2 +1,6 @@
 .env
 *.pdf
+data/*.txt
+faiss_index/
+index/
+.venv/
