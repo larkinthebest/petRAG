@@ -1,11 +1,11 @@
 langchain
-langchain-core
 langchain-community
 langchain-google-genai
 langchain-huggingface
-langchain-text-splitters
+langchain-core
 pypdf
 python-docx
 faiss-cpu
 sentence-transformers
+streamlit
 python-dotenv

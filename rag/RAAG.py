@@ -1,5 +1,5 @@
 from pathlib import Path
-import langchain_community
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from pypdf import PdfReader
 from docx import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -11,10 +11,11 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.chat_models import init_chat_model
-from langchain.tools import tool
+from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
+from langchain_classic.retrievers import ContextualCompressionRetriever
 import os, sys
 from dotenv import load_dotenv
+import streamlit as st
 
 load_dotenv()
 model_name = os.getenv('LLM_model', 'gemini-2.5-flash-lite')
@@ -82,7 +83,10 @@ def embedding(chunks: list[dict], embedding_model):
 
 
 def chain_pipe(vbstore):
-    retrieval = vbstore.as_retriever(search_kwargs = {'k': 4, 'fetch_k': 20}, search_type="mmr")
+    retrieval = vbstore.as_retriever(search_kwargs = {'k': 20})
+    reranker = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    kompresor = CrossEncoderReranker(model=reranker, top_n=3)
+    compression_retriever = ContextualCompressionRetriever(base_compressor=kompresor, base_retriever=retrieval)
     
     template = """You are a helpful assistant that must take information only from the provided context, not the internet.
     Chat History: {chat_history}
@@ -98,9 +102,11 @@ def chain_pipe(vbstore):
         return chat_history_store 
     def format_docs(docs):
         return "\n".join([f'text: {doc.page_content}\n\nsource: {doc.metadata["source"]}, page: {doc.metadata["page"]}' for doc in docs])
-    
-    chain = {'context':retrieval | format_docs,"question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
-    
+    chain = {
+        'context': (lambda x: x['question']) | compression_retriever | format_docs,
+        'question': lambda x: x['question']
+    } | prompt | llm | StrOutputParser()
+        
     chain_with_history = RunnableWithMessageHistory(
     chain,
     session_history,
@@ -110,27 +116,58 @@ def chain_pipe(vbstore):
     
     return chain_with_history
 
-if __name__ == '__main__':
+
+@st.cache_resource
+def init_system():
+    
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    if os.path.exists(INDEX_NAME := 'faiss_index'):
-       vstoring = FAISS.load_local('faiss_index',embeddings=embedding_model, allow_dangerous_deserialization=True)
+    
+    
+    if os.path.exists('faiss_index'):
+        vstoring = FAISS.load_local('faiss_index', embeddings=embedding_model, allow_dangerous_deserialization=True)
     else:    
         document = load_data(data_path)
         if not document:
-            print('no documents')
+            st.error('No docs in folder data, please add some documents and reload the page')
             sys.exit()
-        print(f'uploaded {len(document)} documents')
         split = chunking(document)
         vstoring = embedding(split, embedding_model)
     
-    rag_chain = chain_pipe(vstoring)
     
-    print('system is ready to work\n')
-    while True:
-        query = input('user: ')
-        if query.lower() == 'exit':
-            break
-        else:
-            response = rag_chain.invoke({"question": query},
-                                        config={"configurable": {"session_id": "user_1"}})
-            print(f'\nai: {response}\n')
+    rag_chain = chain_pipe(vstoring)
+    return rag_chain
+
+
+st.title("🤖 my RAG")
+
+
+rag_chain = init_system()
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+
+if prompt := st.chat_input("Ask a question about your documents..."):
+
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+
+    with st.chat_message("assistant"):
+       
+        with st.spinner("Analyzing documents..."):
+            
+            response = rag_chain.invoke({"question": prompt},
+                config={"configurable": {"session_id": "user_1"}})
+            
+            
+            st.markdown(response)
+            
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
